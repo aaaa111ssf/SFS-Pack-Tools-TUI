@@ -63,11 +63,27 @@ def platform_asset_name() -> str:
     raise ExportError(f"暂不支持的操作系统 {platform.system()} 请使用 --asset-ripper 指定 AssetRipper 可执行文件")
 
 
+RIPPER_EXE_NAMES = (
+    "assetripper.gui.free.exe", "assetripper.gui.free",
+    "assetripper.gui.exe", "assetripper.gui",
+    "assetripper.exe",
+)
+
+
 def executable_candidates(directory: Path) -> Iterable[Path]:
-    names = {"AssetRipper.GUI.Free", "AssetRipper.GUI.Free.exe", "AssetRipper.GUI"}
+    """在目录（含子目录）里找 AssetRipper 的 GUI 可执行文件。
+
+    用户自己解压的包可能多套一层目录，所以是递归找；名字按小写比对，避免大小写差异。
+    """
     for candidate in directory.rglob("*"):
-        if candidate.is_file() and candidate.name in names:
+        if candidate.is_file() and candidate.name.lower() in RIPPER_EXE_NAMES:
             yield candidate
+
+
+def cli_only_builds(directory: Path) -> list[Path]:
+    """用户可能下成 CLI 版（AssetRipper.CLI.exe）——那个不提供网页界面，本工具用不了。"""
+    return [p for p in directory.rglob("*.exe")
+            if p.is_file() and "cli" in p.name.lower()]
 
 
 def bundled_asset_ripper_candidates() -> list[Path]:
@@ -289,17 +305,30 @@ def unused_local_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def stdout_log_path(log_path: Path) -> Path:
+    """进程标准输出单独一个文件，避免和 AssetRipper 自己的 --log-path 抢同一个文件。"""
+    return log_path.with_name(log_path.stem + ".stdout.log")
+
+
 def log_tail(log_path: Path, limit: int = 4000) -> str:
-    try:
-        text = log_path.read_text(encoding="utf-8", errors="replace").strip()
-        return text[-limit:] if text else "日志为空"
-    except OSError as exc:
-        return f"无法读取日志 {exc}"
+    """把标准输出和 AssetRipper 自己的日志拼起来看，两种启动模式都能排错。"""
+    parts: list[str] = []
+    for path in (stdout_log_path(log_path), log_path):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if text:
+            parts.append(text)
+    merged = "\n".join(parts).strip()
+    return merged[-limit:] if merged else "日志为空"
 
 
 def has_unsupported_advanced_options(log_path: Path) -> bool:
     text = log_tail(log_path).lower()
-    return "unrecognized command or argument '--headless'" in text or "'--log' was not matched" in text
+    return ("unrecognized command or argument '--headless'" in text
+            or "'--log' was not matched" in text
+            or "unknown argument name" in text)
 
 
 def wait_for_server(base_url: str, process: subprocess.Popen[object], log_path: Path, timeout: float = 25.0) -> None:
@@ -334,26 +363,76 @@ def post_path(base_url: str, endpoint: str, target_path: Path) -> None:
         raise ExportError(f"AssetRipper 请求 {endpoint} 失败 {exc}") from exc
 
 
+_CLI_OPTION_CACHE: dict[tuple, set[str]] = {}
+
+
+def probe_cli_options(executable: Path) -> set[str]:
+    """问一次 --help，看这个版本的 AssetRipper 认哪些参数。
+
+    1.x 只有 --port/--launch-browser，2.x 换成了 --headless/--log/--log-path，
+    混用会直接被判"未知参数"退出，所以必须先问清楚再拼命令。
+    """
+    try:
+        stat = executable.stat()
+    except OSError:
+        return set()
+    key = (str(executable), stat.st_mtime_ns, stat.st_size)
+    cached = _CLI_OPTION_CACHE.get(key)
+    if cached is not None:
+        return cached
+    options: set[str] = set()
+    try:
+        proc = subprocess.run(
+            [str(executable), "--help"], capture_output=True, text=True,
+            timeout=40, cwd=str(executable.parent),
+        )
+        text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        for name in ("--headless", "--log-path", "--log", "--port", "--launch-browser"):
+            if name in text:
+                options.add(name)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _CLI_OPTION_CACHE[key] = options
+    return options
+
+
+def build_ripper_command(
+    executable: Path, port: int, log_path: Path, options: set[str], mode: str
+) -> list[str]:
+    """按探到的参数拼启动命令；探不到就只给 --port，最保守。"""
+    if mode == "headless" and "--headless" in options:
+        command = [str(executable), "--headless", "--port", str(port)]
+        if "--log" in options:
+            command.append("--log")
+        if "--log-path" in options:
+            command += ["--log-path", str(log_path)]
+        return command
+    if mode == "compat" and "--launch-browser" in options:
+        return [str(executable), "--port", str(port), "--launch-browser", "false"]
+    return [str(executable), "--port", str(port)]
+
+
 def start_asset_ripper(
-    executable: Path, port: int, log_path: Path, compatibility_mode: bool = False
+    executable: Path, port: int, log_path: Path,
+    options: set[str] | None = None, mode: str = "headless",
 ) -> subprocess.Popen[object]:
-    command = (
-        [str(executable), "--port", str(port), "--launch-browser", "false"]
-        if compatibility_mode
-        else [str(executable), "--headless", "--port", str(port), "--log", "--log-path", str(log_path)]
-    )
+    if options is None:
+        options = probe_cli_options(executable)
+    command = build_ripper_command(executable, port, log_path, options, mode)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_file = log_path.open("w", encoding="utf-8")
+    # 标准输出另存一份：--log-path 那个文件由 AssetRipper 自己独占，我们不能同时占着
+    out_path = stdout_log_path(log_path)
+    out_file = out_path.open("w", encoding="utf-8")
     try:
         return subprocess.Popen(
             command,
-            stdout=log_file,
+            stdout=out_file,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             cwd=str(executable.parent),
         )
     except OSError as exc:
-        log_file.close()
+        out_file.close()
         raise ExportError(f"无法启动 AssetRipper {exc}") from exc
 
 
@@ -696,39 +775,63 @@ def export_prefabs(args: argparse.Namespace) -> None:
 
         port = unused_local_port()
         base_url = f"http://127.0.0.1:{port}"
-        process = start_asset_ripper(executable, port, log_path)
+        options = probe_cli_options(executable)
+        modes = []
+        if "--headless" in options:
+            modes.append("headless")
+        if "--launch-browser" in options:
+            modes.append("compat")
+        if not modes:
+            modes = ["port"]
+
+        log("[*] 正在启动 AssetRipper...")
+        process = None
+        last_error: Exception | None = None
         try:
-            log("[*] 正在启动 AssetRipper...")
-            try:
-                wait_for_server(base_url, process, log_path)
-            except AssetRipperExitError as exc:
-                if has_unsupported_advanced_options(exc.log_path):
-                    compatible_executable = executable
-                    log("[!] 检测到旧版 AssetRipper 正在使用兼容参数重启")
-                elif exc.returncode in ASSET_RIPPER_CRASH_CODES:
-                    # 兼容版与本工具内置版同为 1.1.4：直接复用当前可执行文件，避免在应无网的环境里重新下载。
-                    compatible_executable = executable
-                    log(f"[!] 检测到已知 Windows 崩溃码 {exc.returncode} 改用兼容参数重启 复用内置版本 不联网下载")
-                else:
-                    raise
-                stop_process(process)
-                port = unused_local_port()
-                base_url = f"http://127.0.0.1:{port}"
-                log_path = temporary / "assetripper_compatibility.log"
-                process = start_asset_ripper(compatible_executable, port, log_path, compatibility_mode=True)
-                wait_for_server(base_url, process, log_path)
+            for mode in modes:
+                for attempt in (1, 2):
+                    port = unused_local_port()
+                    base_url = f"http://127.0.0.1:{port}"
+                    log_path = temporary / f"assetripper_{mode}_{attempt}.log"
+                    process = start_asset_ripper(executable, port, log_path, options, mode)
+                    try:
+                        wait_for_server(base_url, process, log_path)
+                        last_error = None
+                        break
+                    except (AssetRipperExitError, ExportError) as exc:
+                        last_error = exc
+                        stop_process(process)
+                        process = None
+                        retryable = (not isinstance(exc, AssetRipperExitError)
+                                     or exc.returncode in ASSET_RIPPER_CRASH_CODES
+                                     or has_unsupported_advanced_options(exc.log_path))
+                        if not retryable:
+                            break
+                        log(f"[!] AssetRipper 启动失败（{mode} 参数 第 {attempt} 次）改用重试")
+                if process is not None:
+                    break
+            if process is None:
+                raise last_error or ExportError("AssetRipper 无法启动")
+
             log("[*] 正在加载解码后的 AssetBundle...")
             post_path(base_url, "/LoadFolder", source_dir)
             log("[*] 正在导出 Unity 工程与 Prefab 资源较多时请耐心等待 ...")
             export_root.mkdir(parents=True, exist_ok=True)
             post_path(base_url, "/Export/UnityProject", export_root)
         finally:
-            stop_process(process)
+            if process is not None:
+                stop_process(process)
 
         project_dir = export_root / "ExportedProject"
         if not project_dir.is_dir():
             log_copy = output_dir.parent / f"{output_dir.name}_assetripper.log"
-            shutil.copy2(log_path, log_copy)
+            texts: list[str] = []
+            for path in (stdout_log_path(log_path), log_path):
+                try:
+                    texts.append(path.read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    continue
+            log_copy.write_text("\n".join(t for t in texts if t.strip()), encoding="utf-8")
             raise ExportError(f"AssetRipper 未生成 ExportedProject 日志已复制到 {log_copy}")
 
         inventory = validate_project(project_dir)

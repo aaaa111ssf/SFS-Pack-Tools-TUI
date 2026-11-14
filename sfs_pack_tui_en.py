@@ -63,6 +63,7 @@ TEXT = {
     "set_path_bad": "No AssetRipper executable found in: {path}",
     "set_path_ok": "Saved: {path}\n         version: {version}",
     "set_need_exe": "         After unzipping you should see AssetRipper.GUI.Free.exe; pick that folder.",
+    "e_cli_build": "[!] That folder contains {name} (the CLI build), which has no web UI and cannot be used here.\n         Please download the GUI archive (AssetRipper_win_x64.zip).",
     "set_unchanged": "Nothing changed",
     "need_value": "[required] {name}; please type it again (Ctrl+C to go back)",
     "cancel": "[cancelled]",

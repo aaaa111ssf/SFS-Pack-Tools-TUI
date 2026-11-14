@@ -200,6 +200,16 @@ def find_ripper_exe(value: str) -> Path | None:
     return None
 
 
+def cli_hint(value: str) -> str:
+    """目录里只有 CLI 版 exe 时，专门提示一句（那个没网页界面，用不了）。"""
+    p = Path(value or "").expanduser()
+    if p.is_dir():
+        builds = exporter.cli_only_builds(p)
+        if builds:
+            return T("e_cli_build", name=builds[0].name)
+    return ""
+
+
 def ripper_dir_setting() -> str:
     """当前保存的 AssetRipper 目录（兼容旧版存的 exe 路径）。"""
     raw = str(STATE.get("ripper_dir") or "").strip()
@@ -276,6 +286,9 @@ def act_export() -> None:
     exe = find_ripper_exe(ripper_dir_setting())
     if exe is None:
         print(T("e_ripper_first"))
+        hint = cli_hint(ripper_dir_setting())
+        if hint:
+            print(hint)
         return
     print(T("t_using_ripper", path=str(exe)))
 
@@ -381,7 +394,7 @@ def act_settings() -> None:
     exe = find_ripper_exe(raw)
     if exe is None:
         print(T("set_path_bad", path=raw))
-        print(T("set_need_exe"))
+        print(cli_hint(raw) or T("set_need_exe"))
         return
     STATE["ripper_dir"] = str(Path(raw).expanduser())
     save_state()

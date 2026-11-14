@@ -63,6 +63,7 @@ TEXT = {
     "set_path_bad": "这个目录里没找到 AssetRipper 可执行文件：{path}",
     "set_path_ok": "已设置：{path}\n         版本：{version}",
     "set_need_exe": "         解压后应能看到 AssetRipper.GUI.Free.exe，直接填那一层的目录。",
+    "e_cli_build": "[!] 这个目录里是 {name}（命令行版），它不带网页界面，本工具用不了。\n         请下载带 GUI 的那个压缩包（AssetRipper_win_x64.zip）。",
     "set_unchanged": "没有改动",
     "need_value": "[必填] {name}，请重新输入（Ctrl+C 返回菜单）",
     "cancel": "[取消]",
