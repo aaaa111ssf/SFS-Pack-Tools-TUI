@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行状态（本机路径，不进仓库）
+_tui_state.json
+.sfs_export_index.json
+
+# 构建产物
+dist/
+build/
+*.exe
+*.spec
+
+# 第三方工具与缓存
+third_party/
+.assetripper/
+
+# 日志
+*.log
+
+# 临时脚本
+_*.py
