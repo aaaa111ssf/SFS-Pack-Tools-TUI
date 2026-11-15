@@ -1033,6 +1033,7 @@ def scan_pack(pack_path: Path, toolkit_root=None, log=None) -> dict:
         "code_assembly": ca,
         "classes": [],
         "custom_classes": [],
+        "unknown_classes": [],
         "assembly_refs": [],
         "route": "stock_only",
         "warnings": [],
@@ -1116,6 +1117,26 @@ def scan_pack(pack_path: Path, toolkit_root=None, log=None) -> dict:
                 f"自定义类判定不可靠（{degrade_reason}）已退化为"
                 f"「{'包内类名 − Toolkit 类名' if toolkit_root else '包内全部类名'}」"
                 f"这份口径**可能把原版类算成自定义类** 后续自动修复可能不完整"
+            )
+
+    # 3.5) 类名兜底核对：程序集名说“都是原版”，不代表游戏里真有这些类。
+    #      1.7 的 ModSupport 新类（MathModule / MultiStepToggleSequenceModule）
+    #      也挂在 Assembly-CSharp 上，光看程序集会判成 stock_only，进游戏却缺脚本。
+    native = toolkit_script_classes(toolkit_root) if toolkit_root else set()
+    if toolkit_root and not native:
+        warnings.append(
+            "Toolkit 里没找到 Assets/Scripts 无法核对类名 "
+            "（填 Toolkit 源码根目录才能查出「游戏里缺哪些脚本」）"
+        )
+    elif native:
+        # 自定义 dll 提供的类天然不在 Toolkit 里，别把它们算成「缺失」
+        unknown = sorted(set(result["classes"]) - native - set(result["custom_classes"]))
+        if unknown:
+            result["unknown_classes"] = unknown
+            shown = ", ".join(unknown[:8]) + ("…" if len(unknown) > 8 else "")
+            warnings.append(
+                f"包内 {len(unknown)} 个类在 Toolkit 里找不到：{shown}"
+                f"｜这些类游戏里很可能没有，进游戏会报 Missing Script"
             )
 
     # 4) 建议路线

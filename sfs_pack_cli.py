@@ -137,6 +137,9 @@ def cmd_scan(args) -> int:
     log(f"  CodeAssembly: {ca_state}")
     custom = rep.get("custom_classes") or []
     log(f"  {lb['custom']}: " + (", ".join(custom) if custom else lb["no"]))
+    unknown = rep.get("unknown_classes") or []
+    if unknown:
+        log(f"  {'缺失类' if lb['pack'] == '包' else 'Missing in toolkit'}: " + ", ".join(unknown))
     log(f"  {lb['route']}: {rep['route']}")
     for w in rep.get("warnings", []):
         log(f"  [!] {w}")
