@@ -401,6 +401,26 @@ def act_settings() -> None:
     print_ripper_status(STATE["ripper_dir"])
 
 
+def act_doctor() -> None:
+    """体检：包或工程，只报告不改。"""
+    target = ask_required(T("p_doctor_target"), STATE.get("doctor_target", "") or STATE.get("pack", ""))
+    if not target:
+        return
+    STATE["doctor_target"] = target
+    cli.cmd_doctor(SimpleNamespace(path=target, toolkit=STATE.get("toolkit", "")))
+
+
+def act_fix() -> None:
+    """安全修复：会先备份。"""
+    target = ask_required(T("p_doctor_target"), STATE.get("doctor_target", "") or STATE.get("pack", ""))
+    if not target:
+        return
+    STATE["doctor_target"] = target
+    if not ask_yes(T("q_fix_confirm", path=target)):
+        return
+    cli.cmd_fix(SimpleNamespace(path=target, yes=True))
+
+
 ITEMS = [
     {"key": "1", "title": "menu_scan", "fn": act_scan},
     {"key": "2", "title": "menu_info", "fn": act_info},
@@ -415,6 +435,8 @@ ITEMS = [
     {"key": "b", "title": "menu_selfcheck", "fn": act_selfcheck},
     {"key": "c", "title": "menu_cache", "fn": act_cache},
     {"key": "d", "title": "menu_settings", "fn": act_settings},
+    {"key": "e", "title": "menu_doctor", "fn": act_doctor},
+    {"key": "f", "title": "menu_fix", "fn": act_fix},
 ]
 
 

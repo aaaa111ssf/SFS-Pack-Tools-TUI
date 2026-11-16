@@ -232,6 +232,53 @@ def cmd_selfcheck(args) -> int:
     return 0 if not rep.get("missing") else 2
 
 
+def cmd_doctor(args) -> int:
+    """体检：包或工程，只报告不改动。"""
+    import sfs_pack_doctor as doctor
+    target = Path(args.path)
+    if not target.exists():
+        log(f"[体检] 路径不存在: {target}")
+        return 1
+    rep = doctor.inspect_pack(target, args.toolkit or "") if target.is_file() \
+        else doctor.inspect_project(target)
+    if not rep.get("ok"):
+        for it in rep["issues"]:
+            log(f"[体检] [!] {it['title']}")
+        return 1
+    log(f"[体检] {rep['kind']}: {rep['target']}")
+    for key, value in (rep.get("stats") or {}).items():
+        log(f"  {key}: {value}")
+    if not rep["issues"]:
+        log("  ✅ 没有发现问题")
+        return 0
+    errors = 0
+    for it in rep["issues"]:
+        if it["level"] == "error":
+            errors += 1
+        log(f"  [{it['level']}] {it['title']}")
+        for line in it["detail"]:
+            log(f"        - {line}")
+    return 2 if errors else 0
+
+
+def cmd_fix(args) -> int:
+    """安全修复：只做不会损坏数据的操作，动手前先备份。"""
+    import sfs_pack_doctor as doctor
+    target = Path(args.path)
+    if not target.exists():
+        log(f"[修复] 路径不存在: {target}")
+        return 1
+    if not args.yes:
+        log("[修复] 这一步会改文件（改前自动备份），确认请加 --yes")
+        return 1
+    done, skipped = doctor.fix_safe(target)
+    for line in done:
+        log(f"[修复] {line}")
+    for line in skipped:
+        log(f"[修复] 跳过：{line}")
+    return 0
+
+
 def cmd_cache(args) -> int:
     """列出或清理缓存。"""
     items = logic.scan_cache(args.toolkit or "")
@@ -444,6 +491,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--keys", help="要清理的 key，逗号分隔")
     s.add_argument("--yes", action="store_true", help="确认真的删")
     s.set_defaults(func=cmd_cache)
+
+    s = sub.add_parser("doctor", help="体检：包或工程，只报告不改动")
+    s.add_argument("path")
+    s.add_argument("--toolkit", default="", help="Toolkit 目录（用于核对缺失的脚本类）")
+    s.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("fix", help="安全修复（会先备份），只修不会损坏数据的项")
+    s.add_argument("path")
+    s.add_argument("--yes", action="store_true", help="确认执行")
+    s.set_defaults(func=cmd_fix)
     return p
 
 
