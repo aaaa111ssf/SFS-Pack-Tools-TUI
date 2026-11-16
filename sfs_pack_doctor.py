@@ -292,3 +292,268 @@ def fix_safe(target: Path) -> tuple[list[str], list[str]]:
     elif not done:
         skipped.append("这个包没有需要安全修复的问题")
     return done, skipped
+
+
+# --------------------------------------------------------------------------- #
+# 摘掉「游戏不认的脚本」：先列清单，由人勾选，再动手
+# --------------------------------------------------------------------------- #
+
+# 每个类被摘掉之后会失去什么（给人做决定用）
+CONSEQUENCES = {
+    "RenderSortingModule": "发光/光晕的渲染层级排序失效：光效可能穿透箭体，或前后遮挡顺序错乱",
+    "MathModule": "依赖它的变量运算与条件判断不再执行，相关联动/自动化失效",
+    "MultiStepToggleSequenceModule": "多段开关失效，只能停在默认状态（例如分级展开不再逐段推进）",
+    "RepeatMoveModule": "循环移动动画失效，部件停在初始位置",
+    "FlapModule": "襟翼/翼面开合动画失效",
+    "BalloonModule": "气球膨胀/浮力表现失效",
+    "GravityRingModule": "重力环效果失效",
+    "SurfaceShadingModule": "表面明暗着色失效，外观可能偏平或偏暗",
+    "AtmosphericFlameModule": "大气层内的火焰表现失效",
+    "ExternalVariableModule": "对外暴露的变量失效，其他部件读不到它",
+    "VariableConverterModule": "变量换算失效",
+    "DisableOnNoFlow": "断流时自动禁用失效（部件可能一直保持启用）",
+    "PartVisualizer": "编辑器里的部件外观可视化失效（不影响飞行）",
+    "VariablesDrawer": "变量面板绘制失效（不影响飞行）",
+    "PartContextMenu": "部件右键菜单项失效",
+}
+GENERIC_CONSEQUENCE = ("该组件对应的功能会完全失效；如果它正好是部件核心模块"
+                       "（Part / 资源 / 引擎 / 碰撞），这个部件可能放不上或直接坏掉")
+
+
+def consequence_for(name: str) -> str:
+    """给一个类名，返回摘掉它的后果说明。"""
+    return CONSEQUENCES.get(name, GENERIC_CONSEQUENCE)
+
+
+def _script_class_map(env) -> dict[int, str]:
+    """bundle 里 MonoScript pathID -> 类名。"""
+    out: dict[int, str] = {}
+    for obj in env.objects:
+        if obj.type.name != "MonoScript":
+            continue
+        try:
+            tt = obj.read_typetree()
+        except Exception:
+            continue
+        out[obj.path_id] = tt.get("m_ClassName") or ""
+    return out
+
+
+def find_unknown_components(target: Path, toolkit_root: str = "") -> list[dict]:
+    """列出「游戏里没有的脚本组件」，包和工程都支持。
+
+    包：按类名聚合（类名来自 MonoScript），附带挂载对象名。
+    工程：按脚本 GUID 聚合（工程里没有 .cs 时拿不到类名）。
+    """
+    target = Path(target)
+    entries: list[dict] = []
+    if target.is_dir():
+        assets = target / "Assets" if (target / "Assets").is_dir() else target
+        known: set[str] = set()
+        for meta in assets.rglob("*.meta"):
+            try:
+                hit = META_GUID.search(meta.read_text(encoding="utf-8", errors="ignore"))
+            except OSError:
+                continue
+            if hit:
+                known.add(hit.group(1))
+        dead: dict[str, list[str]] = defaultdict(list)
+        for prefab in assets.rglob("*.prefab"):
+            try:
+                text = prefab.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for guid in M_SCRIPT.findall(text):
+                if guid not in known:
+                    dead[guid].append(prefab.name)
+        for guid, files in dead.items():
+            entries.append({"key": guid, "label": f"未知脚本 {guid[:8]}…", "kind": "project",
+                            "count": len(files), "where": sorted(set(files))})
+        return entries
+
+    # 包
+    import UnityPy
+    try:
+        data = json.loads(target.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return entries
+    native = core.toolkit_script_classes(toolkit_root) if toolkit_root else set()
+    if not native:
+        # 没有 Toolkit 就没法判断哪些是「游戏不认的」，不猜
+        return entries
+    try:
+        own = core.custom_monoscript_classes(target)
+    except Exception:
+        own = set()
+
+    agg: dict[str, dict] = {}
+    for key in ("WindowsBuild", "AndroidBuild", "MacBuild", "IOS_Build"):
+        raw = data.get(key)
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            env = UnityPy.load(base64.b64decode(raw))
+        except Exception:
+            continue
+        scripts = _script_class_map(env)
+        gos: dict[int, str] = {}
+        for obj in env.objects:
+            if obj.type.name == "GameObject":
+                try:
+                    gos[obj.path_id] = obj.read_typetree().get("m_Name") or ""
+                except Exception:
+                    continue
+        for obj in env.objects:
+            if obj.type.name != "MonoBehaviour":
+                continue
+            try:
+                tt = obj.read_typetree()
+            except Exception:
+                continue
+            cls = scripts.get((tt.get("m_Script") or {}).get("m_PathID"))
+            if not cls or cls in native or cls in own:
+                continue
+            slot = agg.setdefault(cls, {"key": cls, "label": cls, "kind": "pack",
+                                        "count": 0, "platforms": [], "where": []})
+            slot["count"] += 1
+            if key not in slot["platforms"]:
+                slot["platforms"].append(key)
+            name = gos.get((tt.get("m_GameObject") or {}).get("m_PathID"), "")
+            if name and len(slot["where"]) < 8:
+                slot["where"].append(name)
+    entries = list(agg.values())
+    entries.sort(key=lambda x: -x["count"])
+    return entries
+
+
+def strip_unknown(target: Path, keys: list[str]) -> tuple[list[str], list[str]]:
+    """把选中的脚本组件摘掉。包改 bundle，工程改 prefab 文本；改前备份。"""
+    target = Path(target)
+    keys = [k for k in keys if k]
+    done: list[str] = []
+    errors: list[str] = []
+    if not keys:
+        return done, ["没有勾选任何项"]
+
+    if target.is_dir():
+        return _strip_project(target, keys)
+    return _strip_pack(target, keys)
+
+
+def _strip_pack(pack: Path, classes: list[str]) -> tuple[list[str], list[str]]:
+    """包里摘组件：断开关联并清空槽位，组件对象留作孤儿。"""
+    import UnityPy
+    done: list[str] = []
+    errors: list[str] = []
+    try:
+        data = json.loads(pack.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return done, [f"读不了这个包：{exc}"]
+
+    total = 0
+    for key in ("WindowsBuild", "AndroidBuild", "MacBuild", "IOS_Build"):
+        raw = data.get(key)
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            env = UnityPy.load(base64.b64decode(raw))
+        except Exception as exc:
+            errors.append(f"{key} 解析失败：{exc}")
+            continue
+        scripts = _script_class_map(env)
+        victims: dict[int, int] = {}
+        for obj in env.objects:
+            if obj.type.name != "MonoBehaviour":
+                continue
+            try:
+                tt = obj.read_typetree()
+            except Exception:
+                continue
+            cls = scripts.get((tt.get("m_Script") or {}).get("m_PathID"))
+            if cls in classes:
+                victims[obj.path_id] = (tt.get("m_GameObject") or {}).get("m_PathID")
+        if not victims:
+            continue
+        for obj in env.objects:
+            if obj.type.name != "GameObject":
+                continue
+            try:
+                tt = obj.read_typetree()
+            except Exception:
+                continue
+            comps = tt.get("m_Component") or []
+            keep = [c for c in comps
+                    if (c.get("component") or {}).get("m_PathID") not in victims]
+            if len(keep) != len(comps):
+                tt["m_Component"] = keep
+                obj.save_typetree(tt)
+        for pid in victims:
+            for obj in env.objects:
+                if obj.path_id != pid:
+                    continue
+                tt = obj.read_typetree()
+                tt["m_GameObject"] = {"m_FileID": 0, "m_PathID": 0}
+                obj.save_typetree(tt)
+                break
+        data[key] = base64.b64encode(env.file.save(packer="lz4")).decode("ascii")
+        total += len(victims)
+        done.append(f"{key}: 摘掉 {len(victims)} 个组件")
+
+    if not total:
+        return done, ["这个包里没找到要摘的组件"]
+    backup = pack.with_suffix(pack.suffix + ".bak")
+    if not backup.exists():
+        shutil.copy2(pack, backup)
+    pack.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    done.append(f"已写回 {pack}（备份 {backup.name}），共摘 {total} 个")
+    return done, errors
+
+
+def _strip_project(root: Path, guids: list[str]) -> tuple[list[str], list[str]]:
+    """工程里摘组件：整段删掉 MonoBehaviour 文档，并清掉 GameObject 里的引用。"""
+    assets = root / "Assets" if (root / "Assets").is_dir() else root
+    done: list[str] = []
+    errors: list[str] = []
+    targets = set(guids)
+    block = re.compile(r"(?m)^--- !u!114 &(-?\d+)[^\n]*\n")
+    touched = 0
+    for prefab in assets.rglob("*.prefab"):
+        try:
+            text = prefab.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        heads = list(block.finditer(text))
+        if not heads:
+            continue
+        kill: set[str] = set()
+        for i, m in enumerate(heads):
+            start = m.start()
+            end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+            seg = text[start:end]
+            hit = M_SCRIPT.search(seg)
+            if hit and hit.group(1) in targets:
+                kill.add(m.group(1))
+        if not kill:
+            continue
+        pieces = []
+        cursor = 0
+        for i, m in enumerate(heads):
+            start = m.start()
+            end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+            if m.group(1) in kill:
+                pieces.append(text[cursor:start])
+                cursor = end
+        pieces.append(text[cursor:])
+        new_text = "".join(pieces)
+        for pid in kill:
+            new_text = re.sub(r"(?m)^\s*- component: \{fileID: %s\}\n" % re.escape(pid), "", new_text)
+        backup = prefab.with_suffix(".prefab.bak")
+        if not backup.exists():
+            shutil.copy2(prefab, backup)
+        prefab.write_text(new_text, encoding="utf-8")
+        touched += 1
+        done.append(f"{prefab.name}: 摘掉 {len(kill)} 个组件")
+    if not touched:
+        errors.append("工程里没找到要摘的组件")
+    return done, errors
+

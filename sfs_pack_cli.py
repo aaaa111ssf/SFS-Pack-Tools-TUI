@@ -279,6 +279,37 @@ def cmd_fix(args) -> int:
     return 0
 
 
+def cmd_strip_scripts(args) -> int:
+    """摘掉游戏不认的脚本组件；不给 --classes 就只列清单。"""
+    import sfs_pack_doctor as doctor
+    target = Path(args.path)
+    if not target.exists():
+        log(f"[摘除] 路径不存在: {target}")
+        return 1
+    classes = [c.strip() for c in (args.classes or "").split(",") if c.strip()]
+    if not classes:
+        items = doctor.find_unknown_components(target, args.toolkit or "")
+        if not items:
+            log("[摘除] 没检出可摘的组件（Toolkit 里没有的类自动列出；游戏独缺的请用 --classes 手填）")
+            return 0
+        log(f"[摘除] 可摘 {len(items)} 类：")
+        for it in items:
+            plats = "/".join(it.get("platforms") or [])
+            log(f"  {it['label']}  ×{it['count']}  {plats}")
+            log(f"      后果：{doctor.consequence_for(it['key'])}")
+        log("[摘除] 确认后加 --classes 类名1,类名2 --yes")
+        return 0
+    if not args.yes:
+        log("[摘除] 这一步会改文件（改前自动备份），确认请加 --yes")
+        return 1
+    done, errors = doctor.strip_unknown(target, classes)
+    for line in done:
+        log(f"[摘除] {line}")
+    for line in errors:
+        log(f"[摘除] [!] {line}")
+    return 0 if not errors else 2
+
+
 def cmd_cache(args) -> int:
     """列出或清理缓存。"""
     items = logic.scan_cache(args.toolkit or "")
@@ -501,6 +532,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("path")
     s.add_argument("--yes", action="store_true", help="确认执行")
     s.set_defaults(func=cmd_fix)
+
+    s = sub.add_parser("strip-scripts", help="摘掉游戏不认的脚本组件（先备份）")
+    s.add_argument("path")
+    s.add_argument("--classes", help="逗号分隔的类名；不给则只列清单")
+    s.add_argument("--toolkit", default="", help="Toolkit 目录（用于自动检出）")
+    s.add_argument("--yes", action="store_true", help="确认执行")
+    s.set_defaults(func=cmd_strip_scripts)
     return p
 
 

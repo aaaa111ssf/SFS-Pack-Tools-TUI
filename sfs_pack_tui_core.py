@@ -421,6 +421,23 @@ def act_fix() -> None:
     cli.cmd_fix(SimpleNamespace(path=target, yes=True))
 
 
+def act_strip_scripts() -> None:
+    """摘掉游戏不认的脚本组件（先列清单，再确认）。"""
+    target = ask_required(T("p_doctor_target"), STATE.get("doctor_target", "") or STATE.get("pack", ""))
+    if not target:
+        return
+    STATE["doctor_target"] = target
+    toolkit = STATE.get("toolkit", "")
+    cli.cmd_strip_scripts(SimpleNamespace(path=target, classes="", toolkit=toolkit, yes=False))
+    names = ask(T("p_strip_classes"), "")
+    if not names:
+        return
+    if not ask_yes(T("q_strip_confirm", names=names, path=target)):
+        return
+    cli.cmd_strip_scripts(SimpleNamespace(path=target, classes=names,
+                                          toolkit=toolkit, yes=True))
+
+
 ITEMS = [
     {"key": "1", "title": "menu_scan", "fn": act_scan},
     {"key": "2", "title": "menu_info", "fn": act_info},
@@ -437,6 +454,7 @@ ITEMS = [
     {"key": "d", "title": "menu_settings", "fn": act_settings},
     {"key": "e", "title": "menu_doctor", "fn": act_doctor},
     {"key": "f", "title": "menu_fix", "fn": act_fix},
+    {"key": "g", "title": "menu_strip_scripts", "fn": act_strip_scripts},
 ]
 
 
